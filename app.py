@@ -65,7 +65,13 @@ CUSTOM_CSS = """
     color: var(--ink);
     line-height: 1.65;
     max-width: 820px;
-    margin: 0 auto;
+    margin: 0;
+  }
+  /* Match the download button's horizontal extent to the preview card so
+     its left edge lines up with the text inside the card. */
+  div[data-testid="stDownloadButton"] {
+    max-width: 820px;
+    margin: 0;
   }
   .doc-paper h1, .doc-paper h2, .doc-paper h3, .doc-paper h4 {
     font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
@@ -92,18 +98,6 @@ CUSTOM_CSS = """
     margin: 0.7rem 0;
   }
   .doc-paper p:first-child { margin-top: 0; }
-  .stat-row { display:flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
-  .stat {
-    flex: 1 1 0;
-    min-width: 130px;
-    background: #ffffff;
-    border: 1px solid var(--rule);
-    border-radius: 10px;
-    padding: 0.85rem 1rem;
-  }
-  .stat .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
-  .stat .value { color: var(--ink); font-size: 1.5rem; font-weight: 600; line-height: 1.2; margin-top: 0.15rem; }
-  .stat.warn .value { color: var(--accent); }
   div[data-testid="stSidebar"] { border-right: 1px solid var(--rule); }
   div[data-testid="stSidebar"] h2 { font-size: 1rem; }
   .filename {
@@ -116,6 +110,25 @@ CUSTOM_CSS = """
     display: inline-block;
     margin-top: 0.4rem;
     word-break: break-all;
+  }
+  /* Download button: calm charcoal so it complements (rather than competes
+     with) the amber primary "Extract" button. */
+  div[data-testid="stDownloadButton"] button {
+    background-color: var(--ink);
+    color: #ffffff;
+    border: 1px solid var(--ink);
+    font-weight: 500;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+  }
+  div[data-testid="stDownloadButton"] button:hover {
+    background-color: #111827;
+    border-color: #111827;
+    color: #ffffff;
+  }
+  div[data-testid="stDownloadButton"] button:focus,
+  div[data-testid="stDownloadButton"] button:active {
+    color: #ffffff;
+    box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.25);
   }
 </style>
 """
@@ -133,21 +146,41 @@ st.markdown(
 )
 
 
+def _clear_pdf():
+    st.session_state.pop("pdf_file", None)
+    st.session_state.pop("last_key", None)
+
+
 with st.sidebar:
     st.markdown("## Source PDF")
-    uploaded = st.file_uploader("PDF file", type="pdf", label_visibility="collapsed")
 
-    if uploaded:
-        pdf_bytes = uploaded.getvalue()
+    stashed = st.session_state.get("pdf_file")
+
+    if stashed is None:
+        new_upload = st.file_uploader(
+            "PDF file", type="pdf", label_visibility="collapsed", key="_uploader"
+        )
+        if new_upload is not None:
+            st.session_state["pdf_file"] = {
+                "name": new_upload.name,
+                "bytes": new_upload.getvalue(),
+            }
+            st.rerun()
+
+    if stashed is not None:
+        pdf_bytes = stashed["bytes"]
+        file_name = stashed["name"]
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         n_pages = doc.page_count
         doc.close()
 
-        st.markdown(
-            f'<span class="filename">{html.escape(uploaded.name)}</span>'
+        col_a, col_b = st.columns([5, 1])
+        col_a.markdown(
+            f'<div class="filename" style="margin: 0;">📄 {html.escape(file_name)}</div>'
             f'<div style="color:#6b7280; font-size:0.8rem; margin-top:0.4rem;">{n_pages} pages</div>',
             unsafe_allow_html=True,
         )
+        col_b.button("✕", help="Remove file", on_click=_clear_pdf)
 
         st.markdown("## Page range")
         col1, col2 = st.columns(2)
@@ -159,19 +192,22 @@ with st.sidebar:
             extract_clicked = False
         else:
             st.markdown("")
-            extract_clicked = st.button("Extract highlights", type="primary", use_container_width=True)
+            extract_clicked = st.button(
+                "Extract highlights", type="primary", use_container_width=True
+            )
     else:
         pdf_bytes = None
+        file_name = None
         extract_clicked = False
         start = end = 1
 
 
-if not uploaded:
+if pdf_bytes is None:
     st.markdown(
         """
         <div class="empty-state">
-          <span class="emoji">⬅️</span>
-          <div><strong>Upload a PDF in the sidebar to begin.</strong></div>
+          <span class="emoji">📄</span>
+          <div><strong>Upload a PDF to begin.</strong></div>
           <div style="margin-top: 0.4rem; font-size: 0.85rem;">Works best with digitally generated PDFs containing highlight annotations.</div>
         </div>
         """,
@@ -188,7 +224,23 @@ def _run(pdf_hash: str, pdf_bytes: bytes, start: int, end: int, title: str):
     return result, md, docx
 
 
-if not extract_clicked:
+pdf_hash = hashlib.sha1(pdf_bytes).hexdigest()
+title = file_name.rsplit(".", 1)[0]
+current_key = (pdf_hash, int(start), int(end))
+
+# Buttons only return True for the single rerun after a click. Persist the
+# last extracted key so the preview survives unrelated reruns (download
+# clicks, page-range tweaks) until the user explicitly re-extracts.
+if extract_clicked:
+    st.session_state["last_key"] = current_key
+
+# Drop stale state if a different file was uploaded.
+last_key = st.session_state.get("last_key")
+if last_key and last_key[0] != pdf_hash:
+    last_key = None
+    st.session_state["last_key"] = None
+
+if last_key is None:
     st.markdown(
         f"""
         <div class="empty-state">
@@ -201,37 +253,24 @@ if not extract_clicked:
     )
     st.stop()
 
-
-pdf_hash = hashlib.sha1(pdf_bytes).hexdigest()
-title = uploaded.name.rsplit(".", 1)[0]
+last_hash, last_start, last_end = last_key
 with st.spinner("Extracting highlights…"):
-    result, md, docx_bytes = _run(pdf_hash, pdf_bytes, int(start), int(end), title)
+    result, md, docx_bytes = _run(last_hash, pdf_bytes, last_start, last_end, title)
 
-
-def _stat(label: str, value, warn: bool = False) -> str:
-    cls = "stat warn" if warn else "stat"
-    return f'<div class="{cls}"><div class="label">{label}</div><div class="value">{value}</div></div>'
-
-
-stats_html = '<div class="stat-row">' + "".join([
-    _stat("Annotations", result.total_annotations),
-    _stat("Grouped paragraphs", len(result.grouped)),
-    _stat("Headings detected", result.headings_total),
-    _stat("Empty highlights", result.empty_highlights, warn=result.empty_highlights > 0),
-]) + '</div>'
-st.markdown(stats_html, unsafe_allow_html=True)
+if last_key != current_key:
+    st.info(
+        f"Showing highlights for pages **{last_start}–{last_end}**. "
+        f"Current selection is **{start}–{end}** — click *Extract highlights* to refresh."
+    )
 
 
 out_name = title + "_highlights.docx"
-dl_col, _ = st.columns([1, 3])
-with dl_col:
-    st.download_button(
-        label=f"⬇  Download {out_name}",
-        data=docx_bytes,
-        file_name=out_name,
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        use_container_width=True,
-    )
+st.download_button(
+    label=f"⬇  Download {out_name}",
+    data=docx_bytes,
+    file_name=out_name,
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+)
 
 st.write("")
 
